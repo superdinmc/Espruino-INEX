@@ -74,6 +74,10 @@
 #include "unistroke.h"
 #endif
 
+#ifdef HEARTRATE_DEVICE_VC31
+#include "hrm_vc31.h" // for Bangle.setOptions
+#endif
+
 /*TYPESCRIPT
 declare const BTN1: Pin;
 declare const BTN2: Pin;
@@ -342,6 +346,20 @@ Called when heart rate sensor data is available - see `Bangle.setHRMPower(1)`.
   "confidence": 0  // confidence in the BPM value
 }
 ```
+ */
+/*JSON{
+  "type" : "event",
+  "class" : "Bangle",
+  "name" : "HRM-env",
+  "params" : [["env","JsVar","An integer containing current environment reading"]],
+  "ifdef" : "BANGLEJS2"
+}
+Called when an environment sample heart rate sensor data is available. On the newest VC31B based watches this is only 4 bit (0..15)
+
+To get it you need to turn the HRM on with `Bangle.setHRMPower(1)` and also set `Bangle.setOptions({hrmPushEnv:true})`.
+
+It is also possible to poke registers with `Bangle.hrmWr` to increase the poll rate if needed.
+
  */
 /*TYPESCRIPT
 type PressureData = {
@@ -1333,7 +1351,7 @@ void peripheralPollHandler() {
     tapInfo = buf[0] | (tapType<<6);
   }
   if (tapType) {
-    
+
     // wake on tap, for front (for Bangle.js 2)
 #ifdef BANGLEJS_Q3
     if ((bangleFlags&JSBF_WAKEON_TOUCH) && (tapInfo&2)) {
@@ -1357,7 +1375,7 @@ void peripheralPollHandler() {
     // tap ignores lock
     bangleTasks |= JSBT_ACCEL_TAPPED;
     jshHadEvent();
-    
+
     // clear the IRQ flags
     buf[0]=0x17;
     jsi2cWrite(ACCEL_I2C, ACCEL_ADDR, 1, buf, false);
@@ -1635,6 +1653,9 @@ static void hrmHandler(int ppgValue) {
     jshHadEvent();
   }
   if (bangleFlags & JSBF_HRM_INSTANT_LISTENER) {
+    // what if we already have HRM data that was queued - eg if working with FIFO?
+    /*if (bangleTasks & JSBT_HRM_INSTANT_DATA)
+      jsWarn("Instant HRM data loss\n");*/
     bangleTasks |= JSBT_HRM_INSTANT_DATA;
     jshHadEvent();
   }
@@ -1655,7 +1676,7 @@ void backlightOffHandler() {
 #endif // !EMULATED
 
 void btnHandlerCommon(int button, bool state, IOEventFlags flags) {
-  
+
   // wake up IF LCD power or Lock has a timeout (so will turn off automatically)
   if (lcdPowerTimeout || backlightTimeout || lockTimeout) {
     if (((bangleFlags&JSBF_WAKEON_BTN1)&&(button==1)) ||
@@ -1665,7 +1686,7 @@ void btnHandlerCommon(int button, bool state, IOEventFlags flags) {
         ((bangleFlags&JSBF_WAKEON_BTN3)&&(button==4)) ||
 #endif
         false){ // wake-bind-input
-      // if a 'hard' button, turn LCD on  
+      // if a 'hard' button, turn LCD on
       if (state) {
         bool ignoreBtnUp = false;
         if (lcdPowerTimeout && !(bangleFlags&JSBF_LCD_ON)) {
@@ -1689,12 +1710,12 @@ void btnHandlerCommon(int button, bool state, IOEventFlags flags) {
           return; // consume wake event
         }
       }
-    } 
+    }
   }
   bool pushEvent = true;
   if (bangleFlags&JSBF_LOCKED) pushEvent = false;
   else inactivityTimer = 0; // extend wake in unlocked state
-  
+
   // Handle case where pressing 'home' button repeatedly at just the wrong times
   // could cause us to go home!
   if (button == HOME_BTN) homeBtnTimer = 0;
@@ -2004,7 +2025,7 @@ Bangle.setBacklight(1); // keep screen on
 
 Of course, the backlight depends on `Bangle.setLCDPower` too, so any lcdPowerTimeout/setLCDTimeout will
 also turn the backlight off. The use case is when you require the backlight timeout
-to be shorter than the power timeout. 
+to be shorter than the power timeout.
 */
 /// Turn just the backlight on or off (or adjust brightness)
 void jswrap_banglejs_setLCDPowerBacklight(bool isOn) {
@@ -2017,7 +2038,7 @@ void jswrap_banglejs_setLCDPowerBacklight(bool isOn) {
     }
     jsvUnLock(bangle);
   }
-  
+
   if (isOn) {
     // programatically on counts as wake
     if (backlightTimeout > 0) inactivityTimer = 0;
@@ -2108,7 +2129,7 @@ void jswrap_banglejs_setLCDPower(bool isOn) {
     }
     jsvUnLock(bangle);
   }
-  
+
   if (isOn) {
     // programatically on counts as wake
     if (lcdPowerTimeout > 0 || backlightTimeout > 0) inactivityTimer = 0;
@@ -2328,11 +2349,15 @@ void jswrap_banglejs_setLCDOffset(int y) {
     "name" : "setLCDOverlay",
     "generate" : "jswrap_banglejs_setLCDOverlay",
     "params" : [
-      ["img","JsVar","An image"],
+      ["img","JsVar","An image, or undefined to clear"],
       ["x","int","The X offset the graphics instance should be overlaid on the screen with"],
       ["y","int","The Y offset the graphics instance should be overlaid on the screen with"]
     ],
-    "ifdef" : "BANGLEJS_Q3"
+    "#if" : "defined(BANGLEJS_Q3) || defined(DICKENS)",
+    "typescript" : [
+      "setLCDOverlay(img: any, x: number, y: number): void;",
+      "setLCDOverlay(): void;"
+    ]
 }
 Overlay an image or graphics instance on top of the contents of the graphics buffer.
 
@@ -2378,13 +2403,16 @@ Bangle.setLCDOverlay({
 void jswrap_banglejs_setLCDOverlay(JsVar *imgVar, int x, int y) {
 #ifdef LCD_CONTROLLER_LPM013M126
   lcdMemLCD_setOverlay(imgVar, x, y);
+#endif
+#if defined(LCD_CONTROLLER_ST7789V) || defined(LCD_CONTROLLER_ST7735) || defined(LCD_CONTROLLER_GC9A01)
+  lcdSetOverlay_SPILCD(imgVar, x, y);
+#endif
   // set all as modified
   // TODO: Could look at old vs new overlay state and update only lines that had changed?
   graphicsInternal.data.modMinX = 0;
   graphicsInternal.data.modMinY = 0;
   graphicsInternal.data.modMaxX = LCD_WIDTH-1;
   graphicsInternal.data.modMaxY = LCD_HEIGHT-1;
-#endif
 }
 
 /*JSON{
@@ -2531,6 +2559,9 @@ for before the clock is reloaded? 1500ms default, or 0 means never.
 * `hrmSportMode` - on the newest Bangle.js 2 builds with with the proprietary
   heart rate algorithm, this is the sport mode passed to the algorithm. See `libs/misc/vc31_binary/algo.h`
   for more info. -1 = auto, 0 = normal (default), 1 = running, 2 = ...
+* `hrmGreenAdjust` - (Bangle.js 2, 2v19+) if false (default is true) the green LED intensity won't be adjusted to get the HRM sensor 'exposure' correct
+* `hrmWearDetect` - (Bangle.js 2, 2v19+) if false (default is true) HRM readings won't be turned off if the watch isn't on your arm (based on HRM proximity sensor)
+* `hrmPushEnv` - (Bangle.js 2, 2v19+) if true (default is false) HRM environment readings will be produced as `Bangle.on(`HRM-env`, ...)` events
 * `seaLevelPressure` (Bangle.js 2) Normally 1013.25 millibars - this is used for
   calculating altitude with the pressure sensor
 
@@ -2566,6 +2597,11 @@ JsVar * _jswrap_banglejs_setOptions(JsVar *options, bool createObject) {
 #endif
 #ifdef HEARTRATE_VC31_BINARY
       {"hrmSportMode", JSV_INTEGER, &_hrmSportMode},
+#endif
+#ifdef HEARTRATE_DEVICE_VC31
+      {"hrmGreenAdjust", JSV_BOOLEAN, &vcInfo.allowGreenAdjust},
+      {"hrmWearDetect", JSV_BOOLEAN, &vcInfo.allowWearDetect},
+      {"hrmPushEnv", JSV_BOOLEAN, &vcInfo.pushEnvData},
 #endif
 #ifdef PRESSURE_DEVICE
       {"seaLevelPressure", JSV_FLOAT, &barometerSeaLevelPressure},
@@ -4034,6 +4070,9 @@ void jswrap_banglejs_kill() {
 #ifdef LCD_CONTROLLER_LPM013M126
   // ensure we remove any overlay we might have set
   lcdMemLCD_setOverlay(NULL, 0, 0);
+#endif
+#if defined(LCD_CONTROLLER_ST7789V) || defined(LCD_CONTROLLER_ST7735) || defined(LCD_CONTROLLER_GC9A01)
+  lcdSetOverlay_SPILCD(NULL, 0, 0);
 #endif
   // Graphics var is getting removed, so set this to null.
   jsvUnLock(graphicsInternal.graphicsVar);
@@ -6002,3 +6041,31 @@ JsVar *jswrap_banglejs_appRect() {
   return o;
 }
 
+
+/// Called from jsinteractive when an event is parsed from the event queue for Bangle.js (executed outside IRQ)
+void jsbangle_exec_pending(IOEvent *evt) {
+  assert(event=>type == EV_BANGLEJS);
+  uint16_t value = ((uint8_t)evt->data.chars[1])<<8 | (uint8_t)evt->data.chars[2];
+  switch ((JsBangleEvent)evt->data.chars[0]) {
+    case JSBE_HRM_ENV: {
+      JsVar *bangle = jsvObjectGetChildIfExists(execInfo.root, "Bangle");
+      if (bangle) {
+        JsVar *v = jsvNewFromInteger(value);
+        jsiQueueObjectCallbacks(bangle, JS_EVENT_PREFIX"HRM-env", &v, 1);
+        jsvUnLock(v);
+      }
+      jsvUnLock(bangle);
+      break;
+    }
+  }
+}
+
+/// Called from jsinteractive when an event is parsed from the event queue for Bangle.js
+void jsbangle_push_event(JsBangleEvent type, uint16_t value) {
+  IOEvent evt;
+  evt.flags = EV_BANGLEJS;
+  evt.data.chars[0] = type;
+  evt.data.chars[1] = (char)((value>>8) & 0xFF);
+  evt.data.chars[2] = (char)(value & 0xFF);
+  jshPushEvent(&evt);
+}
